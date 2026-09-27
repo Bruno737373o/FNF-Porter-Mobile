@@ -7,7 +7,6 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
@@ -54,26 +53,80 @@ public class ReverseConverter {
         }
         for (File songFolder : FileOps.listAll(songsDir)) {
             if (!songFolder.isDirectory()) continue;
-            File chartFile = null, metaFile = null;
+            List<File> chartFiles = new ArrayList<File>();
+            File metaFile = null;
             for (File f : FileOps.listAll(songFolder)) {
-                String n = f.getName();
-                if (n.endsWith("-chart.json")) chartFile = f;
-                else if (n.endsWith("-metadata.json")) metaFile = f;
+                String n = f.getName().toLowerCase(Locale.US);
+                String chartPrefix = songFolder.getName().toLowerCase(Locale.US) + "-chart";
+                if (f.isFile() && n.endsWith(".json") && n.startsWith(chartPrefix)
+                        && (n.length() == chartPrefix.length() + 5 || n.startsWith(chartPrefix + "-"))) chartFiles.add(f);
+                else if (f.isFile() && n.endsWith("-metadata.json")) {
+                    // Prefer the shared song metadata over difficulty-specific metadata.
+                    if (metaFile == null || n.equals(songFolder.getName().toLowerCase(Locale.US) + "-metadata.json")) metaFile = f;
+                }
             }
-            if (chartFile == null || metaFile == null) {
-                AppLog.warn(songFolder.getName() + ": chart/metadata missing");
+            Collections.sort(chartFiles, new Comparator<File>() {
+                @Override public int compare(File a, File b) { return a.getName().compareToIgnoreCase(b.getName()); }
+            });
+            if (chartFiles.isEmpty()) {
+                AppLog.warn(songFolder.getName() + ": no *-chart.json files found");
                 continue;
             }
-            try {
-                JSONObject chart = new JSONObject(FileOps.readText(chartFile));
-                JSONObject meta = new JSONObject(FileOps.readText(metaFile));
-                JSONObject psych = chartToPsych(chart, meta);
-                File destDir = new File(outRoot, "data/" + songFolder.getName());
-                FileOps.folderMake(destDir.getAbsolutePath());
-                FileOps.writeText(new File(destDir, songFolder.getName() + ".json"), psych.toString(2));
-                AppLog.info("  OK " + songFolder.getName());
-            } catch (Exception e) {
-                AppLog.error("  Failed " + songFolder.getName(), e);
+            if (metaFile == null) AppLog.warn(songFolder.getName() + ": metadata missing; using safe defaults");
+            File destDir = new File(outRoot, "data/" + songFolder.getName());
+            FileOps.folderMake(destDir.getAbsolutePath());
+            for (File chartFile : chartFiles) {
+                try {
+                    JSONObject sourceChart = new JSONObject(FileOps.readText(chartFile));
+                    String chartName = chartFile.getName();
+                    String chartPrefix = songFolder.getName() + "-chart";
+                    String variation = "default";
+                    if (chartName.length() > chartPrefix.length() + 5) {
+                        String between = chartName.substring(chartPrefix.length(), chartName.length() - ".json".length());
+                        if (between.startsWith("-")) variation = between.substring(1);
+                    }
+                    File variationMeta = new File(songFolder, songFolder.getName() + "-metadata-" + variation + ".json");
+                    File selectedMeta = variationMeta.isFile() ? variationMeta : metaFile;
+                    JSONObject meta = selectedMeta == null ? null : new JSONObject(FileOps.readText(selectedMeta));
+                    JSONObject payload = sourceChart.optJSONObject("chart");
+                    if (payload == null) payload = sourceChart;
+                    JSONObject notesByDifficulty = payload.optJSONObject("notes");
+                    List<String> difficulties = new ArrayList<String>();
+                    if (notesByDifficulty != null) {
+                        Iterator<String> keys = notesByDifficulty.keys();
+                        while (keys.hasNext()) difficulties.add(keys.next());
+                        Collections.sort(difficulties, new Comparator<String>() {
+                            @Override public int compare(String a, String b) { return a.compareToIgnoreCase(b); }
+                        });
+                    } else {
+                        difficulties.add("normal");
+                    }
+                    if (difficulties.isEmpty()) difficulties.add("normal");
+                    for (String difficulty : difficulties) {
+                        JSONObject oneDiff = new JSONObject(sourceChart.toString());
+                        JSONObject diffPayload = oneDiff.optJSONObject("chart");
+                        if (diffPayload == null) diffPayload = oneDiff;
+                        JSONObject notes = diffPayload.optJSONObject("notes");
+                        if (notes != null) {
+                            JSONArray selected = notes.optJSONArray(difficulty);
+                            if (selected == null) continue;
+                            diffPayload.put("notes", selected);
+                            JSONObject speeds = diffPayload.optJSONObject("scrollSpeed");
+                            if (speeds != null) diffPayload.put("scrollSpeed", speeds.optDouble(difficulty, 1.0));
+                        }
+                        JSONObject psych = chartToPsych(diffPayload, meta);
+                        String diffSuffix = "normal".equalsIgnoreCase(difficulty) || "default".equalsIgnoreCase(difficulty)
+                                ? "" : "-" + difficulty;
+                        // Psych has no V-Slice variation concept; keep variation identity in the filename
+                        // rather than overwriting a same-named chart from another variation.
+                        String variationSuffix = "default".equalsIgnoreCase(variation) ? "" : "-" + variation;
+                        String outputName = songFolder.getName() + variationSuffix + diffSuffix + ".json";
+                        FileOps.writeText(new File(destDir, outputName), psych.toString(2));
+                        AppLog.info("  OK " + chartFile.getName() + " [" + difficulty + "] -> " + outputName);
+                    }
+                } catch (Exception e) {
+                    AppLog.error("  Failed chart " + chartFile.getName(), e);
+                }
             }
         }
     }
@@ -83,10 +136,11 @@ public class ReverseConverter {
         File polymod = new File(modRoot, "_polymod_meta.json");
         try {
             JSONObject pack = new JSONObject();
+            JSONObject sourceMeta = null;
             if (polymod.exists()) {
-                JSONObject meta = new JSONObject(FileOps.readText(polymod));
-                pack.put("name", meta.optString("title", modName));
-                pack.put("description", meta.optString("description", "Converted by FNF Porter For Mobile"));
+                sourceMeta = new JSONObject(FileOps.readText(polymod));
+                pack.put("name", sourceMeta.optString("title", modName));
+                pack.put("description", sourceMeta.optString("description", "Converted by FNF Porter For Mobile"));
             } else {
                 pack.put("name", modName);
                 pack.put("description", "Converted by FNF Porter For Mobile");
@@ -94,6 +148,12 @@ public class ReverseConverter {
             }
             pack.put("runsGlobally", false);
             FileOps.writeText(new File(outRoot, "pack.json"), pack.toString(4));
+            if (sourceMeta != null) {
+                // Retain Polymod compatibility/attribution metadata alongside Psych's pack.json.
+                // Keep unknown/future Polymod keys too; metadata consumers can ignore fields
+                // they do not understand, while a converter should avoid destroying them.
+                FileOps.writeText(new File(outRoot, "_polymod_meta.json"), sourceMeta.toString(4));
+            }
             AppLog.info("  pack.json");
         } catch (Exception e) {
             AppLog.error("pack.json failed", e);
@@ -270,11 +330,20 @@ public class ReverseConverter {
                     String hx = FileOps.readText(f);
                     HScriptToLua conv = new HScriptToLua();
                     String lua = conv.convert(hx);
+                    if (n.endsWith(".hx")) {
+                        conv.warnings.add("Input uses .hx; V-Slice's documented interpreted mod-script extension is .hxc. Verify this is HScript, not compiled Haxe source.");
+                    }
                     String outName = f.getName().replaceAll("(?i)\\.hxc?$", ".lua");
                     FileOps.writeText(new File(dst, outName), lua);
+                    File staleReport = new File(dst, outName + ".conversion-warnings.txt");
+                    if (staleReport.exists()) staleReport.delete();
                     AppLog.info("  " + f.getName() + " -> " + outName);
                     if (conv.warnings.size() > 0) {
-                        AppLog.warn("    " + conv.warnings.size() + " line(s) need manual check");
+                        AppLog.warn("    " + conv.warnings.size() + " review warning(s); see sidecar report");
+                        StringBuilder report = new StringBuilder("FNF Porter: manual review required\nSource: ")
+                                .append(f.getName()).append("\nDirection: HScript -> Lua (best-effort)\n\n");
+                        for (String warning : conv.warnings) report.append("- ").append(warning).append("\n");
+                        FileOps.writeText(new File(dst, outName + ".conversion-warnings.txt"), report.toString());
                     }
                     count[0]++;
                 } else if (n.endsWith(".lua")) {
@@ -333,6 +402,7 @@ public class ReverseConverter {
         }
 
         List<JSONObject> allNotes = new ArrayList<JSONObject>();
+        int droppedNoteParams = 0;
         for (int i = 0; i < notesList.length(); i++) {
             JSONObject n = notesList.optJSONObject(i);
             if (n != null) {
@@ -341,6 +411,8 @@ public class ReverseConverter {
                 o.put("data", n.optInt("d", 0));
                 o.put("length", n.isNull("l") ? 0 : n.optDouble("l", 0));
                 o.put("kind", n.optString("k", ""));
+                JSONArray params = n.optJSONArray("p");
+                if (params != null && params.length() > 0) droppedNoteParams++;
                 allNotes.add(o);
             } else {
                 JSONArray arr = notesList.optJSONArray(i);
@@ -353,6 +425,9 @@ public class ReverseConverter {
                     allNotes.add(o);
                 }
             }
+        }
+        if (droppedNoteParams > 0) {
+            AppLog.warn("Chart contains " + droppedNoteParams + " note(s) with V-Slice custom parameter arrays; Psych notes cannot represent these generically, so those parameters were omitted.");
         }
         Collections.sort(allNotes, new Comparator<JSONObject>() {
             @Override
@@ -395,8 +470,10 @@ public class ReverseConverter {
             psychEvents.put(row);
         }
 
-        double beatMs = 60000.0 / (bpm == 0 ? 100 : bpm);
-        double sectionMs = beatMs * 4;
+        String timeFormat = metaData == null ? "ms" : metaData.optString("timeFormat", "ms");
+        if (!"ms".equalsIgnoreCase(timeFormat)) AppLog.warn("Song timeFormat is '" + timeFormat + "'; timestamps are interpreted as milliseconds. Review this chart.");
+        if (bpm <= 0 || Double.isNaN(bpm) || Double.isInfinite(bpm)) bpm = 100;
+        double sectionMs = 60000.0 / bpm * 4;
         double maxTime = 0;
         for (JSONObject n : allNotes) maxTime = Math.max(maxTime, n.optDouble("time") + n.optDouble("length"));
         for (int i = 0; i < psychEvents.length(); i++) {
@@ -404,44 +481,66 @@ public class ReverseConverter {
             if (row != null) maxTime = Math.max(maxTime, row.optDouble(0));
         }
         if (maxTime <= 0) maxTime = sectionMs * 4;
-        int numSections = Math.max(1, (int) (maxTime / sectionMs) + 2);
-
-        Map<Integer, Double> bpmChanges = new HashMap<Integer, Double>();
+        List<JSONObject> tempoChanges = new ArrayList<JSONObject>();
         JSONArray tcs = metaData == null ? null : metaData.optJSONArray("timeChanges");
-        if (tcs != null) {
-            for (int i = 0; i < tcs.length(); i++) {
-                JSONObject tc = tcs.optJSONObject(i);
-                if (tc != null && tc.has("t") && tc.has("bpm")) {
-                    bpmChanges.put((int) (tc.optDouble("t") / sectionMs), tc.optDouble("bpm"));
+        if (tcs != null) for (int i = 0; i < tcs.length(); i++) {
+            JSONObject tc = tcs.optJSONObject(i);
+            if (tc != null && tc.has("t") && tc.has("bpm")) {
+                if (tc.optInt("n", 4) != 4 || tc.optInt("d", 4) != 4) {
+                    AppLog.warn("Non-4/4 time signature is not representable in Psych sections; chart timing may differ.");
                 }
+                tempoChanges.add(tc);
             }
         }
-        Map<Integer, Boolean> focus = new HashMap<Integer, Boolean>();
-        for (int i = 0; i < eventsData.length(); i++) {
-            JSONObject ev = eventsData.optJSONObject(i);
-            if (ev == null || !"FocusCamera".equals(ev.optString("e"))) continue;
-            JSONObject v = ev.optJSONObject("v");
-            if (v == null) continue;
-            int charId = v.optInt("char", 0);
-            int sec = (int) (ev.optDouble("t") / sectionMs);
-            focus.put(sec, charId == 1);
+        Collections.sort(tempoChanges, new Comparator<JSONObject>() {
+            @Override public int compare(JSONObject a, JSONObject b) { return Double.compare(a.optDouble("t"), b.optDouble("t")); }
+        });
+        List<Double> sectionStarts = new ArrayList<Double>();
+        List<Double> sectionEnds = new ArrayList<Double>();
+        List<Double> sectionBpms = new ArrayList<Double>();
+        List<Boolean> sectionBpmChanges = new ArrayList<Boolean>();
+        double sectionStart = 0;
+        double currentTempo = bpm == 0 ? 100 : bpm;
+        int tempoIndex = 0;
+        while (tempoIndex < tempoChanges.size() && tempoChanges.get(tempoIndex).optDouble("t") <= 0) {
+            double value = tempoChanges.get(tempoIndex++).optDouble("bpm", currentTempo);
+            if (value > 0 && !Double.isNaN(value) && !Double.isInfinite(value)) currentTempo = value;
         }
-
+        for (int sectionIndex = 0; sectionIndex < 100000; sectionIndex++) {
+            boolean changed = false;
+            while (tempoIndex < tempoChanges.size() && tempoChanges.get(tempoIndex).optDouble("t") <= sectionStart + 0.001) {
+                double nextTempo = tempoChanges.get(tempoIndex++).optDouble("bpm", currentTempo);
+                if (nextTempo <= 0 || Double.isNaN(nextTempo) || Double.isInfinite(nextTempo)) {
+                    AppLog.warn("Ignoring invalid BPM in song metadata.");
+                    continue;
+                }
+                if (Math.abs(nextTempo - currentTempo) > 0.000001) changed = true;
+                currentTempo = nextTempo;
+            }
+            double duration = 60000.0 / (currentTempo == 0 ? 100 : currentTempo) * 4;
+            sectionStarts.add(sectionStart);
+            sectionEnds.add(sectionStart + duration);
+            sectionBpms.add(currentTempo);
+            sectionBpmChanges.add(changed || sectionIndex == 0);
+            sectionStart += duration;
+            if (sectionStart > maxTime && sectionIndex >= 1) break;
+        }
+        if (sectionStarts.size() >= 100000) AppLog.warn("Chart section limit reached; remaining tail may be truncated.");
         JSONArray sections = new JSONArray();
-        double currentBpm = bpm;
         boolean mustHit = false;
-        for (int i = 0; i < numSections; i++) {
-            double secStart = i * sectionMs;
-            double secEnd = (i + 1) * sectionMs;
-            boolean changeBpm = false;
-            if (bpmChanges.containsKey(i)) {
-                double nb = bpmChanges.get(i);
-                if (nb != currentBpm) {
-                    currentBpm = nb;
-                    changeBpm = true;
-                }
+        for (int i = 0; i < sectionStarts.size(); i++) {
+            double secStart = sectionStarts.get(i);
+            double secEnd = sectionEnds.get(i);
+            double currentBpm = sectionBpms.get(i);
+            boolean changeBpm = sectionBpmChanges.get(i);
+            for (int eventIndex = 0; eventIndex < eventsData.length(); eventIndex++) {
+                JSONObject focusEvent = eventsData.optJSONObject(eventIndex);
+                if (focusEvent == null || !"FocusCamera".equals(focusEvent.optString("e"))) continue;
+                double focusTime = focusEvent.optDouble("t", -1);
+                if (focusTime < secStart || focusTime >= secEnd) continue;
+                JSONObject focusValue = focusEvent.optJSONObject("v");
+                if (focusValue != null) mustHit = focusValue.optInt("char", 0) == 1;
             }
-            if (focus.containsKey(i)) mustHit = focus.get(i);
             JSONArray sectionNotes = new JSONArray();
             for (JSONObject note : allNotes) {
                 double t = note.optDouble("time");
@@ -452,6 +551,10 @@ public class ReverseConverter {
                     sn.put(t);
                     sn.put(psychLane);
                     sn.put(note.optDouble("length"));
+                    // Psych note arrays support an optional note-type field after sustain length.
+                    // Keep V-Slice note kinds instead of silently discarding them.
+                    String kind = note.optString("kind", "");
+                    if (!kind.isEmpty()) sn.put(kind);
                     sectionNotes.put(sn);
                 }
             }
@@ -470,8 +573,8 @@ public class ReverseConverter {
             JSONArray sns = last.optJSONArray("sectionNotes");
             if (sns != null && sns.length() > 0) break;
             int idx = sections.length() - 1;
-            double secStart = idx * sectionMs;
-            double secEnd = (idx + 1) * sectionMs;
+            double secStart = sectionStarts.get(idx);
+            double secEnd = sectionEnds.get(idx);
             boolean hasEv = false;
             for (int i = 0; i < psychEvents.length(); i++) {
                 JSONArray row = psychEvents.optJSONArray(i);
@@ -560,7 +663,7 @@ public class ReverseConverter {
         JSONObject characters = stage.optJSONObject("characters");
         if (characters == null) characters = new JSONObject();
         JSONObject psych = new JSONObject();
-        psych.put("directory", "");
+        psych.put("directory", stage.optString("directory", ""));
         psych.put("defaultZoom", stage.opt("cameraZoom") != null ? stage.opt("cameraZoom") : 0.9);
         psych.put("isPixelStage", stage.optBoolean("isPixel", false));
         psych.put("boyfriend", charPos(characters, "bf", 770, 100));
@@ -622,6 +725,22 @@ public class ReverseConverter {
             if (scroll.optDouble(0) != 1 || scroll.optDouble(1) != 1) {
                 sb.append("    setScrollFactor(\"").append(esc(tag)).append("\", ")
                         .append(scroll.opt(0)).append(", ").append(scroll.opt(1)).append(")\n");
+            }
+            if (prop.optDouble("alpha", 1) != 1) {
+                sb.append("    setProperty('" ).append(esc(tag)).append(".alpha', ").append(prop.optDouble("alpha", 1)).append(")\n");
+            }
+            if (prop.optDouble("angle", 0) != 0) {
+                sb.append("    setProperty('" ).append(esc(tag)).append(".angle', ").append(prop.optDouble("angle", 0)).append(")\n");
+            }
+            if (prop.optBoolean("flipX", false)) sb.append("    setProperty('").append(esc(tag)).append(".flipX', true)\n");
+            if (prop.optBoolean("flipY", false)) sb.append("    setProperty('").append(esc(tag)).append(".flipY', true)\n");
+            if (prop.optBoolean("isPixel", false)) sb.append("    setProperty('").append(esc(tag)).append(".antialiasing', false)\n");
+            String color = prop.optString("color", "#FFFFFF");
+            if (color.length() == 7 && !"#FFFFFF".equalsIgnoreCase(color)) {
+                sb.append("    setProperty('").append(esc(tag)).append(".color', getColorFromHex('").append(esc(color.substring(1))).append("'))\n");
+            }
+            if (prop.has("blend") && !prop.optString("blend", "").isEmpty()) {
+                AppLog.warn("Stage prop '" + tag + "' uses blend mode '" + prop.optString("blend") + "'; blend conversion needs manual verification.");
             }
             sb.append("    addLuaSprite(\"").append(esc(tag)).append("\", ").append(z >= 100).append(")\n\n");
         }

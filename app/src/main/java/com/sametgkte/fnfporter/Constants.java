@@ -107,17 +107,29 @@ public class Constants {
 
     public static JSONObject characterTemplate() throws JSONException {
         JSONObject c = new JSONObject();
-        c.put("version", "1.0.0");
+        c.put("version", "1.0.2");
         c.put("name", JSONObject.NULL);
+        c.put("renderType", "sparrow");
         c.put("assetPath", JSONObject.NULL);
-        c.put("singTime", JSONObject.NULL);
-        c.put("isPixel", JSONObject.NULL);
-        c.put("scale", JSONObject.NULL);
+        c.put("singTime", 8.0);
+        c.put("startingAnimation", "idle");
+        c.put("danceEvery", 1.0);
+        c.put("isPixel", false);
+        c.put("scale", 1.0);
+        c.put("flipX", false);
+        c.put("applyStageMatrix", false);
+        JSONArray offsets = new JSONArray(); offsets.put(0); offsets.put(0);
+        c.put("offsets", offsets);
+        JSONArray camera = new JSONArray(); camera.put(0); camera.put(0);
+        c.put("cameraOffsets", camera);
         JSONObject icon = new JSONObject();
         icon.put("id", JSONObject.NULL);
-        icon.put("isPixel", JSONObject.NULL);
+        icon.put("shouldBop", true);
+        icon.put("isPixel", false);
         icon.put("flipX", false);
-        icon.put("scale", 1);
+        icon.put("scale", 1.0);
+        JSONArray iconOffsets = new JSONArray(); iconOffsets.put(0); iconOffsets.put(25);
+        icon.put("offsets", iconOffsets);
         c.put("healthIcon", icon);
         c.put("animations", new JSONArray());
         return c;
@@ -132,7 +144,11 @@ public class Constants {
         off.put(0);
         a.put("offsets", off);
         a.put("frameRate", 24);
+        a.put("looped", false);
         a.put("frameIndices", new JSONArray());
+        a.put("flipX", false);
+        a.put("flipY", false);
+        a.put("animType", "framelabel");
         return a;
     }
 
@@ -167,8 +183,8 @@ public class Constants {
     public static JSONObject stageTemplate() throws JSONException {
         JSONObject s = new JSONObject();
         s.put("props", new JSONArray());
-        s.put("cameraZoom", JSONObject.NULL);
-        s.put("version", "1.0.0");
+        s.put("cameraZoom", 1.0);
+        s.put("version", "1.0.2");
         JSONObject chars = new JSONObject();
         chars.put("bf", charPos(300, -100, -100));
         chars.put("dad", charPos(200, 150, -100));
@@ -181,7 +197,13 @@ public class Constants {
     private static JSONObject charPos(int z, int camX, int camY) throws JSONException {
         JSONObject o = new JSONObject();
         o.put("zIndex", z);
-        o.put("position", JSONObject.NULL);
+        JSONArray pos = new JSONArray(); pos.put(0); pos.put(0);
+        o.put("position", pos);
+        o.put("scale", 1.0);
+        o.put("alpha", 1.0);
+        o.put("angle", 0.0);
+        JSONArray scroll = new JSONArray(); scroll.put(1); scroll.put(1);
+        o.put("scroll", scroll);
         JSONArray cam = new JSONArray();
         cam.put(camX);
         cam.put(camY);
@@ -199,6 +221,13 @@ public class Constants {
         p.put("scale", scale);
         p.put("name", JSONObject.NULL);
         p.put("isPixel", false);
+        p.put("flipX", false);
+        p.put("flipY", false);
+        p.put("alpha", 1.0);
+        p.put("angle", 0.0);
+        p.put("blend", "");
+        p.put("color", "#FFFFFF");
+        p.put("startingAnimation", JSONObject.NULL);
         p.put("assetPath", JSONObject.NULL);
         JSONArray scroll = new JSONArray(); scroll.put(1); scroll.put(1);
         p.put("scroll", scroll);
@@ -208,7 +237,7 @@ public class Constants {
     public static JSONObject stagePropAnimated() throws JSONException {
         JSONObject p = stagePropImage();
         p.put("animType", "sparrow");
-        p.put("startingAnimation", "Idle");
+        p.put("startingAnimation", JSONObject.NULL);
         p.put("animations", new JSONArray());
         return p;
     }

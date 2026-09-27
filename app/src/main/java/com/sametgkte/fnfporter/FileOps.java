@@ -5,16 +5,22 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 
 public class FileOps {
+    // JSON and scripts are fully materialized in memory by org.json/regex converters.
+    // Reject pathological text inputs before an Android low-memory crash; binary assets use streaming copy.
+    private static final long MAX_TEXT_FILE_BYTES = 32L * 1024L * 1024L;
 
     public static boolean folderMake(String folderPath) {
         File f = new File(folderPath);
         if (f.exists()) {
-            AppLog.warn(folderPath + " already exists!");
-            return true;
+            if (f.isDirectory()) return true;
+            AppLog.error("Cannot create directory; a file already exists at " + folderPath);
+            return false;
         }
         boolean ok = f.mkdirs();
         if (!ok) AppLog.error("Could not create folder: " + folderPath);
@@ -54,10 +60,8 @@ public class FileOps {
             AppLog.warn("Path " + source + " does not exist.");
             return false;
         }
-        if (dst.exists()) {
-            AppLog.warn(destination + " already exists!");
-            return false;
-        }
+        // Merge into an existing output tree and overwrite matching files. This makes
+        // repeated conversions refresh changed assets instead of silently skipping them.
         return copyRecursive(src, dst);
     }
 
@@ -84,6 +88,12 @@ public class FileOps {
         File[] kids = dir.listFiles();
         if (kids == null) return out;
         for (File k : kids) out.add(k);
+        Collections.sort(out, new Comparator<File>() {
+            @Override public int compare(File a, File b) {
+                int byName = a.getName().compareToIgnoreCase(b.getName());
+                return byName != 0 ? byName : a.getName().compareTo(b.getName());
+            }
+        });
         return out;
     }
 
@@ -98,9 +108,13 @@ public class FileOps {
     }
 
     public static String readText(File file) throws IOException {
+        long fileBytes = file.length();
+        if (fileBytes > MAX_TEXT_FILE_BYTES) {
+            throw new IOException("Text file exceeds safe conversion limit (" + fileBytes + " bytes; limit " + MAX_TEXT_FILE_BYTES + "): " + file.getName());
+        }
         FileInputStream in = new FileInputStream(file);
         try {
-            byte[] data = new byte[(int) file.length()];
+            byte[] data = new byte[(int) fileBytes];
             int off = 0;
             while (off < data.length) {
                 int n = in.read(data, off, data.length - off);

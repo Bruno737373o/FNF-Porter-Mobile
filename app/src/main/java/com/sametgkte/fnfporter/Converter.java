@@ -161,15 +161,12 @@ public class Converter {
         AppLog.info("Copying character assets...");
         File src = new File(modRoot, "images/characters");
         File dst = new File(outRoot, "shared/images/characters");
-        FileOps.folderMake(dst.getAbsolutePath());
-        for (File character : FileOps.listAll(src)) {
-            if (character.isFile()) {
-                AppLog.info("Copying asset " + character.getName());
-                FileOps.fileCopy(character.getAbsolutePath(), new File(dst, character.getName()).getAbsolutePath());
-            } else {
-                AppLog.warn(character.getName() + " is a directory, not a file! Skipped");
-            }
+        if (!src.exists()) {
+            AppLog.warn("No images/characters directory found; skipped character assets.");
+            return;
         }
+        AppLog.info("Copying character asset tree (including nested sprite/atlas folders)...");
+        FileOps.treeCopy(src.getAbsolutePath(), dst.getAbsolutePath());
     }
 
     private static void convertCharacters(File modRoot, File outRoot, Map<String, List<String>> characterMap) {
@@ -403,27 +400,27 @@ public class Converter {
     private static void convertScripts(File modRoot, File outRoot) {
         AppLog.info("Converting scripts (Lua -> HScript)...");
         int[] n = new int[]{0};
-        luaToHxcTree(new File(modRoot, "scripts"), new File(outRoot, "scripts"), n);
-        luaToHxcTree(new File(modRoot, "custom_notetypes"), new File(outRoot, "scripts"), n);
-        luaToHxcTree(new File(modRoot, "custom_events"), new File(outRoot, "scripts"), n);
+        luaToHxcTree(new File(modRoot, "scripts"), new File(outRoot, "scripts"), n, LuaToHScript.Context.GENERIC, "");
+        luaToHxcTree(new File(modRoot, "custom_notetypes"), new File(outRoot, "scripts/notekinds"), n, LuaToHScript.Context.NOTE_KIND, "");
+        luaToHxcTree(new File(modRoot, "custom_events"), new File(outRoot, "scripts/events"), n, LuaToHScript.Context.SONG_EVENT, "");
         File data = new File(modRoot, "data");
         if (data.isDirectory()) {
             for (File song : FileOps.listAll(data)) {
                 if (!song.isDirectory()) continue;
-                luaToHxcTree(song, new File(outRoot, "data/songs/" + song.getName()), n);
+                luaToHxcTree(song, new File(outRoot, "scripts/songs/" + song.getName()), n, LuaToHScript.Context.SONG, song.getName());
             }
         }
         if (n[0] == 0) AppLog.warn("No Lua scripts found");
         else AppLog.info("  " + n[0] + " Lua script(s) converted to .hxc");
     }
 
-    private static void luaToHxcTree(File src, File dst, int[] n) {
+    private static void luaToHxcTree(File src, File dst, int[] n, LuaToHScript.Context context, String contextId) {
         if (src == null || !src.exists()) return;
         File[] kids = src.listFiles();
         if (kids == null) return;
         for (File f : kids) {
             if (f.isDirectory()) {
-                luaToHxcTree(f, new File(dst, f.getName()), n);
+                luaToHxcTree(f, new File(dst, f.getName()), n, context, contextId);
                 continue;
             }
             if (!f.getName().toLowerCase(Locale.US).endsWith(".lua")) continue;
@@ -431,12 +428,23 @@ public class Converter {
                 FileOps.folderMake(dst.getAbsolutePath());
                 String lua = FileOps.readText(f);
                 LuaToHScript conv = new LuaToHScript();
-                String hx = conv.convert(lua);
+                String sourceId = contextId;
+                if (sourceId == null || sourceId.length() == 0) {
+                    sourceId = f.getName().replaceAll("(?i)\\.lua$", "");
+                }
+                String hx = conv.convert(lua, context, sourceId);
                 String outName = f.getName().replaceAll("(?i)\\.lua$", ".hxc");
                 FileOps.writeText(new File(dst, outName), hx);
+                File staleReport = new File(dst, outName + ".conversion-warnings.txt");
+                if (staleReport.exists()) staleReport.delete();
                 AppLog.info("  " + f.getName() + " -> " + outName);
                 if (conv.warnings.size() > 0) {
-                    AppLog.warn("    " + conv.warnings.size() + " line(s) need manual check");
+                    AppLog.warn("    " + conv.warnings.size() + " review warning(s); see sidecar report");
+                    StringBuilder report = new StringBuilder("FNF Porter: manual review required\nSource: ")
+                            .append(f.getName()).append("\nContext: ").append(context).append(" / ").append(sourceId)
+                            .append("\nDirection: Lua -> HScript (best-effort)\n\n");
+                    for (String warning : conv.warnings) report.append("- ").append(warning).append("\n");
+                    FileOps.writeText(new File(dst, outName + ".conversion-warnings.txt"), report.toString());
                 }
                 n[0]++;
             } catch (Exception e) {

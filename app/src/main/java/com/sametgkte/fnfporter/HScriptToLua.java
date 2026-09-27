@@ -17,36 +17,54 @@ import java.util.regex.Pattern;
 public class HScriptToLua {
     public final List<String> warnings = new ArrayList<String>();
     private final Set<String> variables = new HashSet<String>();
+    private final Set<String> stringVariables = new HashSet<String>();
     private String className = "";
     private String extendsName = "";
     private String noteKindId = "";
     private String noteKindLabel = "";
+    private int currentLineNumber = 1;
+    private String currentSourceCallback = "";
 
     private static final Set<String> NO_PARAM = new HashSet<String>();
     private static final Map<String, String> CALLBACKS = new HashMap<String, String>();
+    private static final Map<String, String> CALLBACK_PARAMS = new HashMap<String, String>();
 
     static {
         String[] np = {
-                "onCreate", "onCreatePost", "onUpdate", "onUpdatePost",
-                "onBeatHit", "onStepHit", "onSectionHit", "onSongStart", "onEndSong",
-                "onStartCountdown", "onCountdownStarted", "onCountdownTick", "onEvent",
-                "noteMiss", "goodNoteHit", "opponentNoteHit", "onKeyPress", "onKeyRelease",
-                "onGhostTap", "onMoveCamera", "onGameOver", "onPause", "onResume", "onDestroy"
+                "onCreate", "onCreatePost", "onBeatHit", "onStepHit", "onSectionHit",
+                "onSongStart", "onEndSong", "onStartCountdown", "onCountdownStarted",
+                "onGameOver", "onPause", "onResume", "onDestroy"
         };
         for (String s : np) NO_PARAM.add(s);
         CALLBACKS.put("onCountdownStart", "onStartCountdown");
-        CALLBACKS.put("onSongRetry", "onGameOver");
+        CALLBACKS.put("onSongEnd", "onEndSong");
+        CALLBACKS.put("onSongEvent", "onEvent");
         CALLBACKS.put("onNoteHit", "goodNoteHit");
-        CALLBACKS.put("onSustainHit", "goodNoteHit");
+        CALLBACKS.put("onNoteMiss", "noteMiss");
+        CALLBACKS.put("onNoteGhostMiss", "noteMissPress");
+        CALLBACKS.put("onNoteIncoming", "onSpawnNote");
+        CALLBACKS.put("onCountdownStep", "onCountdownTick");
+        CALLBACK_PARAMS.put("onUpdate", "elapsed");
+        CALLBACK_PARAMS.put("onUpdatePost", "elapsed");
+        CALLBACK_PARAMS.put("onCountdownTick", "counter");
+        CALLBACK_PARAMS.put("onEvent", "name, value1, value2, strumTime");
+        CALLBACK_PARAMS.put("noteMissPress", "direction");
+        CALLBACK_PARAMS.put("onSpawnNote", "id, data, type, isSustainNote, strumTime");
+        CALLBACK_PARAMS.put("goodNoteHit", "id, direction, noteType, isSustainNote");
+        CALLBACK_PARAMS.put("noteMiss", "id, direction, noteType, isSustainNote");
+        CALLBACK_PARAMS.put("opponentNoteHit", "id, direction, noteType, isSustainNote");
     }
 
     public String convert(String hscript) {
         warnings.clear();
+        warnings.add("HScript is not Lua; translated callback names and API calls need runtime verification in Psych Engine.");
         variables.clear();
+        stringVariables.clear();
         className = "";
         extendsName = "";
         noteKindId = "";
         noteKindLabel = "";
+        currentSourceCallback = "";
         String code = preprocess(hscript);
         String[] lines = code.split("\n", -1);
         Map<String, Func> functions = new LinkedHashMap<String, Func>();
@@ -56,9 +74,30 @@ public class HScriptToLua {
     }
 
     private static String preprocess(String code) {
-        code = Pattern.compile(";\\s*$", Pattern.MULTILINE).matcher(code).replaceAll("");
-        code = code.replaceAll("cast\\(\\s*(\\w+)\\s*,\\s*\\w+\\s*\\)", "$1");
-        return code;
+        StringBuilder clean = new StringBuilder(code.length());
+        boolean single = false, dbl = false, escape = false, blockComment = false;
+        for (int i = 0; i < code.length(); i++) {
+            char c = code.charAt(i);
+            char next = i + 1 < code.length() ? code.charAt(i + 1) : '\0';
+            if (blockComment) {
+                if (c == '*' && next == '/') { blockComment = false; i++; }
+                else if (c == '\n') clean.append('\n');
+                continue;
+            }
+            if (escape) { clean.append(c); escape = false; continue; }
+            if ((single || dbl) && c == '\\') { clean.append(c); escape = true; continue; }
+            if (c == '\'' && !dbl) single = !single;
+            else if (c == '"' && !single) dbl = !dbl;
+            if (!single && !dbl && c == '/' && next == '/') {
+                while (i < code.length() && code.charAt(i) != '\n') i++;
+                if (i < code.length()) clean.append('\n');
+                continue;
+            }
+            if (!single && !dbl && c == '/' && next == '*') { blockComment = true; i++; continue; }
+            clean.append(c);
+        }
+        String result = Pattern.compile(";\\s*$", Pattern.MULTILINE).matcher(clean.toString()).replaceAll("");
+        return result.replaceAll("cast\\(\\s*(\\w+)\\s*,\\s*\\w+\\s*\\)", "$1");
     }
 
     private static class Func {
@@ -76,6 +115,7 @@ public class HScriptToLua {
 
         while (i < lines.length) {
             String line = lines[i];
+            currentLineNumber = i + 1;
             String stripped = line.trim();
             if (stripped.length() == 0) {
                 if (inFunction) funcBody.add("");
@@ -102,6 +142,7 @@ public class HScriptToLua {
             }
             Matcher cm = classPat.matcher(stripped);
             if (cm.find()) {
+                warnings.add("line " + (i + 1) + ": HScript class '" + cm.group(1) + "' is flattened to Psych Lua callbacks; inheritance, constructor state, and scripted-class lifecycle are not equivalent.");
                 className = cm.group(1);
                 if (cm.groupCount() >= 2 && cm.group(2) != null) extendsName = cm.group(2);
                 inClass = true;
@@ -118,11 +159,38 @@ public class HScriptToLua {
                     functions.put(funcName, f);
                 }
                 String rawName = fm.group(1);
+                currentSourceCallback = rawName;
                 funcName = "new".equals(rawName) ? "__constructor__" : mapCallback(rawName);
+                if ((rawName.startsWith("on") || "goodNoteHit".equals(rawName) || "noteMiss".equals(rawName)
+                        || "opponentNoteHit".equals(rawName)) && !isKnownPsychCallback(funcName)) {
+                    warnings.add("line " + (i + 1) + ": callback '" + rawName + "' has no known Psych Lua equivalent; generated function may never be called.");
+                }
                 funcParams = cleanParams(fm.group(2));
                 funcBody = new ArrayList<String>();
                 inFunction = true;
-                if (stripped.contains("{")) braceDepth++;
+                int inlineOpen = stripped.indexOf('{');
+                int inlineClose = stripped.lastIndexOf('}');
+                if (inlineOpen >= 0 && inlineClose > inlineOpen) {
+                    String inlineBody = stripped.substring(inlineOpen + 1, inlineClose).trim();
+                    if (inlineBody.indexOf('{') >= 0 || inlineBody.indexOf('}') >= 0) {
+                        warnings.add("line " + (i + 1) + ": nested inline method body requires manual review.");
+                    }
+                    for (String statement : splitInlineStatements(inlineBody)) {
+                        String convertedStatement = convertLine(statement);
+                        if (convertedStatement != null) funcBody.add(convertedStatement);
+                    }
+                    Func f = new Func();
+                    f.params = funcParams;
+                    f.body = funcBody;
+                    functions.put(funcName, f);
+                    inFunction = false;
+                    currentSourceCallback = "";
+                    funcName = "";
+                    funcParams = "";
+                    funcBody = new ArrayList<String>();
+                } else if (inlineOpen >= 0) {
+                    braceDepth++;
+                }
                 i++;
                 continue;
             }
@@ -143,6 +211,7 @@ public class HScriptToLua {
                             functions.put(funcName, f);
                         }
                         inFunction = false;
+                        currentSourceCallback = "";
                         funcName = "";
                         funcParams = "";
                         funcBody = new ArrayList<String>();
@@ -176,7 +245,7 @@ public class HScriptToLua {
 
     private String buildOutput(Map<String, Func> functions, List<String> globalLines) {
         List<String> result = new ArrayList<String>();
-        boolean noteKind = "ScriptedNoteKind".equals(extendsName) || noteKindId.length() > 0;
+        boolean noteKind = "NoteKind".equals(extendsName) || "ScriptedNoteKind".equals(extendsName) || noteKindId.length() > 0;
         if (noteKind && functions.containsKey("goodNoteHit")) {
             Func hit = functions.get("goodNoteHit");
             hit.params = "id, direction, noteType, isSustainNote";
@@ -215,11 +284,10 @@ public class HScriptToLua {
         for (Map.Entry<String, Func> e : functions.entrySet()) {
             String name = e.getKey();
             String params = e.getValue().params;
-            if (NO_PARAM.contains(name) && !"goodNoteHit".equals(name) && !"noteMiss".equals(name) && !"opponentNoteHit".equals(name)) {
+            if (CALLBACK_PARAMS.containsKey(name)) {
+                params = CALLBACK_PARAMS.get(name);
+            } else if (NO_PARAM.contains(name)) {
                 params = "";
-            }
-            if ("goodNoteHit".equals(name) || "noteMiss".equals(name) || "opponentNoteHit".equals(name)) {
-                params = "id, direction, noteType, isSustainNote";
             }
             String outName = "startVideo".equals(name) ? "playIntroVideo" : name;
             if ("__constructor__".equals(name)) continue;
@@ -276,6 +344,14 @@ public class HScriptToLua {
         return result;
     }
 
+    private static boolean isKnownPsychCallback(String name) {
+        return NO_PARAM.contains(name) || CALLBACK_PARAMS.containsKey(name) || "onUpdate".equals(name) || "onUpdatePost".equals(name)
+                || "onCountdownTick".equals(name) || "onEvent".equals(name)
+                || "onKeyPress".equals(name) || "onKeyRelease".equals(name)
+                || "onGhostTap".equals(name) || "onMoveCamera".equals(name)
+                || "goodNoteHit".equals(name) || "noteMiss".equals(name) || "opponentNoteHit".equals(name);
+    }
+
     private static String mapCallback(String name) {
         return CALLBACKS.containsKey(name) ? CALLBACKS.get(name) : name;
     }
@@ -297,9 +373,29 @@ public class HScriptToLua {
         return sb.toString();
     }
 
+    private String rewriteCallbackFields(String line) {
+        if ("onUpdate".equals(currentSourceCallback) || "onUpdatePost".equals(currentSourceCallback)) {
+            line = line.replace("event.elapsed", "elapsed");
+        } else if ("onEvent".equals(currentSourceCallback) || "onSongEvent".equals(currentSourceCallback)) {
+            line = line.replace("event.eventData.eventKind", "name")
+                    .replace("event.eventData.time", "strumTime")
+                    .replace("event.eventData.value", "value1");
+        } else if ("onNoteHit".equals(currentSourceCallback) || "onNoteMiss".equals(currentSourceCallback)
+                || "onNoteIncoming".equals(currentSourceCallback)) {
+            line = line.replace("event.note.noteData.kind", "noteType")
+                    .replace("event.note.noteData.data", "direction")
+                    .replace("event.note.strumTime", "strumTime");
+        } else if ("onNoteGhostMiss".equals(currentSourceCallback)) {
+            line = line.replace("event.dir", "direction");
+        } else if ("onCountdownStep".equals(currentSourceCallback)) {
+            line = line.replace("event.step", "counter");
+        }
+        return line;
+    }
+
     private String convertLine(String line) {
         String original = line;
-        line = line.trim();
+        line = rewriteCallbackFields(line.trim());
         if (line.endsWith(";")) line = line.substring(0, line.length() - 1).trim();
         String stripped = line;
 
@@ -314,6 +410,9 @@ public class HScriptToLua {
         }
         if (line.matches("super\\s*\\(.*")) return null;
         if (line.contains("event.cancel()")) return "return Function_Stop";
+        if (Pattern.compile("\\\\bevent\\\\.(?!cancel\\\\b)").matcher(line).find()) {
+            warnings.add("line " + currentLineNumber + ": V-Slice ScriptEvent object fields do not map directly to Psych Lua callback arguments: " + original);
+        }
 
         Matcher m;
         // PlayState / stage character lookups
@@ -415,6 +514,8 @@ public class HScriptToLua {
             return "startVideo".equals(fn) ? "playIntroVideo(" + args + ")" : fn + "(" + args + ")";
         }
 
+        Matcher typedString = Pattern.compile("(?:var|local)\\s+(\\w+)\\s*:\\s*String\\b").matcher(line);
+        if (typedString.find()) stringVariables.add(typedString.group(1));
         m = Pattern.compile("(?:var|local)\\s+(\\w+)(?:\\s*:\\s*[\\w<>]+)?\\s*=\\s*(.+)").matcher(line);
         if (m.find()) {
             variables.add(m.group(1));
@@ -429,8 +530,11 @@ public class HScriptToLua {
         m = Pattern.compile("(\\w+)\\s*\\+=\\s*(.+)").matcher(line);
         if (m.find()) {
             String vn = m.group(1);
-            String rhs = convertValue(m.group(2).trim());
-            return vn + " = " + vn + " .. " + rhs;
+            String rawRhs = m.group(2).trim();
+            String rhs = convertValue(rawRhs);
+            boolean stringConcat = stringVariables.contains(vn) || rawRhs.startsWith("\"") || rawRhs.startsWith("'");
+            if (!stringConcat) warnings.add("line " + currentLineNumber + ": '+=' numeric/string meaning inferred as arithmetic; verify: " + original);
+            return vn + " = " + vn + (stringConcat ? " .. " : " + ") + rhs;
         }
         m = Pattern.compile("if\\s*\\((.+)\\)\\s+return\\s*;?$").matcher(line);
         if (m.find()) return "if " + convertCondition(m.group(1)) + " then return end";
@@ -447,7 +551,7 @@ public class HScriptToLua {
         if ("} else {".equals(stripped) || "} else".equals(stripped)) return "else";
         if ("}".equals(stripped)) return "end";
 
-        m = Pattern.compile("(\\w+)\\s*=\\s*(.+)").matcher(line);
+        m = Pattern.compile("^([\\w.]+)\\s*=\\s*(.+)$").matcher(line);
         if (m.find()) {
             String vn = m.group(1);
             if (!"end then do else return function if elseif for while repeat".contains(vn)) {
@@ -465,7 +569,7 @@ public class HScriptToLua {
             return "for " + m.group(1) + " = " + m.group(2) + ", " + end + " do";
         }
 
-        warnings.add(original);
+        warnings.add("line " + currentLineNumber + ": " + original);
         return null;
     }
 
@@ -516,6 +620,34 @@ public class HScriptToLua {
             sb.append(out.get(i));
         }
         return sb.toString();
+    }
+
+    private static List<String> splitInlineStatements(String body) {
+        List<String> out = new ArrayList<String>();
+        StringBuilder current = new StringBuilder();
+        boolean single = false, dbl = false, escape = false;
+        int parens = 0, brackets = 0;
+        for (int i = 0; i < body.length(); i++) {
+            char c = body.charAt(i);
+            if (escape) { current.append(c); escape = false; continue; }
+            if ((single || dbl) && c == '\\') { current.append(c); escape = true; continue; }
+            if (c == '\'' && !dbl) single = !single;
+            else if (c == '"' && !single) dbl = !dbl;
+            else if (!single && !dbl) {
+                if (c == '(') parens++;
+                else if (c == ')') parens--;
+                else if (c == '[') brackets++;
+                else if (c == ']') brackets--;
+                else if (c == ';' && parens == 0 && brackets == 0) {
+                    if (current.length() > 0) out.add(current.toString().trim());
+                    current.setLength(0);
+                    continue;
+                }
+            }
+            current.append(c);
+        }
+        if (current.length() > 0 && current.toString().trim().length() > 0) out.add(current.toString().trim());
+        return out;
     }
 
     private static int countChar(String s, char c) {

@@ -37,6 +37,10 @@ public class Utils {
     }
 
     public static JSONObject note(int data, Object length, Object time) throws JSONException {
+        return note(data, length, time, null);
+    }
+
+    public static JSONObject note(int data, Object length, Object time, String kind) throws JSONException {
         JSONObject o = new JSONObject();
         o.put("d", data);
         o.put("t", time);
@@ -45,6 +49,7 @@ public class Utils {
         else if (length instanceof String) skipLen = true;
         else if (length instanceof Number && ((Number) length).doubleValue() == 0) skipLen = true;
         if (!skipLen) o.put("l", length);
+        if (kind != null && !kind.trim().isEmpty()) o.put("k", kind);
         return o;
     }
 

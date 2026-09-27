@@ -5,6 +5,7 @@ import org.json.JSONObject;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -81,7 +82,9 @@ public class ChartConverter {
                 unordered.remove(d);
             }
         }
-        difficulties.addAll(unordered);
+        List<String> extraDifficulties = new ArrayList<String>(unordered);
+        Collections.sort(extraDifficulties, String.CASE_INSENSITIVE_ORDER);
+        difficulties.addAll(extraDifficulties);
 
         if (difficulties.isEmpty()) throw new java.io.FileNotFoundException("Chart not found!");
         sampleChart = charts.get(difficulties.get(0));
@@ -194,6 +197,7 @@ public class ChartConverter {
                     double strumTime = note.optDouble(0, 0);
                     int noteData = note.optInt(1, 0);
                     Object length = note.length() > 2 ? note.opt(2) : 0;
+                    String noteKind = note.length() > 3 && !note.isNull(3) ? note.optString(3, "") : "";
 
                     if (noteData < 0 && shouldConvertEvents) {
                         AppLog.warn("Tried converting legacy event. Legacy events are currently not supported. Sorry!");
@@ -209,7 +213,8 @@ public class ChartConverter {
                         String[] p = existing.split("\\|");
                         double et = Double.parseDouble(p[0]);
                         int ed = Integer.parseInt(p[1]);
-                        if (Math.abs(et - strumTime) < 1 && ed == noteData) {
+                        String existingKind = p.length > 2 ? p[2] : "";
+                        if (Math.abs(et - strumTime) < 1 && ed == noteData && existingKind.equals(noteKind)) {
                             dup = true;
                             break;
                         }
@@ -218,9 +223,9 @@ public class ChartConverter {
                         totalDuplicates++;
                         continue;
                     }
-                    prevNotes.add(strumTime + "|" + noteData);
+                    prevNotes.add(strumTime + "|" + noteData + "|" + noteKind);
 
-                    if (note.length() > 3 && "Alt Animation".equals(String.valueOf(note.opt(3)))) {
+                    if ("Alt Animation".equalsIgnoreCase(noteKind)) {
                         String target = (noteData >= 0 && noteData <= 3) ? "player" : "opponent";
                         String anim = altAnim(noteData);
                         String key = strumTime + "|" + target + "|" + anim;
@@ -229,7 +234,7 @@ public class ChartConverter {
                             existingEvents.add(key);
                         }
                     }
-                    notesOut.put(Utils.note(noteData, length, strumTime));
+                    notesOut.put(Utils.note(noteData, length, strumTime, noteKind));
                 }
 
                 if (chartIndex == 0) {
@@ -311,7 +316,14 @@ public class ChartConverter {
             dest.put(Utils.changeCharacter(time, target, charName));
             if (existing != null) existing.add(key);
         } else if (eventType != null && !eventType.isEmpty()) {
-            AppLog.warn("Conversion for event " + eventType + " is not implemented!");
+            // Preserve the event identifier and its two Psych values in the generic V-Slice
+            // event payload. This keeps data recoverable, but a V-Slice ScriptedSongEvent is
+            // still required for equivalent runtime behavior.
+            JSONObject values = new JSONObject();
+            values.put("value", a == null ? "" : a);
+            values.put("value2", b == null ? "" : b);
+            dest.put(Utils.event(time, eventType, values));
+            AppLog.warn("Event '" + eventType + "' data preserved, but runtime behavior requires a V-Slice ScriptedSongEvent.");
         }
     }
 
