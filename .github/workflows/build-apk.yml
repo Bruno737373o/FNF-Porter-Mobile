@@ -70,13 +70,19 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          # setup-android@v3 defaults to "tools platform-tools"; Google removed the legacy tools package.
           packages: platform-tools
 
-      - name: Install Android platform and build-tools
+      - name: Install Android platform, build-tools & NDK
         run: |
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platforms;android-34" "build-tools;34.0.0"
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;25.2.9519653"
+
+      - name: Download & Embed FFmpeg for Android
+        run: |
+          mkdir -p app/src/main/assets/bin/
+          # Baixa o binário executável do FFmpeg compilado para Android ARM64
+          curl -L -o app/src/main/assets/bin/ffmpeg https://github.com/KRTirtho/ffmpeg-binaries/releases/download/v1.0.0/ffmpeg-android-arm64
+          chmod +x app/src/main/assets/bin/ffmpeg
 
       - name: Build APK
         run: |
@@ -125,7 +131,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          test -f "$APK_NAME" || { echo "missing $APK_NAME"; ls -la; exit 1; }
+          test -f "$APK_NAME" \vert{}\vert{} { echo "missing $APK_NAME"; ls -la; exit 1; }
 
           PRE_FLAG=()
           LATEST_FLAG=(--latest)
@@ -136,29 +142,14 @@ jobs:
 
           NOTES="$(mktemp)"
           cat > "$NOTES" <<EOF
-          ## FNF Porter For Mobile ${TAG}
+          ## FNF Porter For Mobile ${TAG} (Com FFmpeg Embutido)
 
-          Psych Engine ↔ V-Slice / Base Game porter for Android.
-
-          | | |
-          |---|---|
-          | **App version** | ${VERSION} (versionCode ${VERSION_CODE}) |
-          | **Package** | \`com.sametgkte.fnfporter\` |
-          | **Min Android** | 7.0 (API 24) |
-          | **Funkin api_version** | 0.8.5 |
+          Psych Engine ↔ V-Slice / Base Game porter para Android com suporte a conversão de áudio.
 
           ### Install
           1. Download \`${APK_NAME}\`
           2. Allow install from unknown sources
           3. Grant **All files access**
-          4. Pick folders with **Files** → **Use this folder**
-
-          Script conversion is best-effort. Review generated \`.lua\` / \`.hxc\` files.
-
-          ### Credits
-          - **Original FNF Porter:** Gusborg, tposejank, BombasticTom & VocalFan ([Porter.py](https://github.com/FNF-Porter/Porter.py), CC BY-NC 4.0)
-          - **Android:** SametGkTe
-          - Android Ported By GkTe's Archive Tool 2.5.21
           EOF
 
           if gh release view "$TAG" >/dev/null 2>&1; then
@@ -181,5 +172,6 @@ jobs:
               "${LATEST_FLAG[@]}"
           fi
 
-          echo "Published ${TAG} → ${APK_NAME}"
+          echo "Published ${TAG} →${APK_NAME}"
           gh release view "$TAG"
+          
